@@ -3,6 +3,10 @@
 //! 这个 crate 先作为学习型渲染器的代码实验场存在。具体 Vulkan 绑定、
 //! 资源封装、渲染图和光追模块会随着 `Docs/Vulkan-Learning` 的计划逐步落地。
 
+pub mod window;
+
+pub use window::{WindowConfig, run_window_shell};
+
 #[cfg(test)]
 mod tests {
     #[test]
