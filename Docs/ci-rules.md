@@ -73,6 +73,15 @@ feat: initialize vulkan instance (#13)
 6. PR 必须至少获得 1 次审批后才能合并。
 7. 每个 PR 都必须至少分配给 1 个 assignee。
 
+## PR 创建前检查清单
+
+1. 已创建 Issue，且 Issue 标题符合规范。
+2. Issue 至少有 1 个 assignee。
+3. 工作分支名以 Issue ID 开头，例如 `12-vulkan-bootstrap`。
+4. Commit 标题以 `(#<issue ID>)` 结尾，且 Issue ID 与分支前缀一致。
+5. PR 创建后立刻分配至少 1 个 assignee。
+6. 若任务完成了一个可执行子任务，已更新 `Docs/Knowledge-Graph` 中对应知识图谱。
+
 ## CI 检查内容
 
 仓库 CI 计划执行以下检查：

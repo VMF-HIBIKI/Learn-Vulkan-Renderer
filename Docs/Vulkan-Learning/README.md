@@ -14,6 +14,8 @@
   - [可执行子任务索引](/e:/RustProject/Learn-Vulkan-Renderer/Docs/Vulkan-Learning/04-Executable-Subtasks/README.md)
 - 第五层：子任务开发计划
   - [开发计划索引](/e:/RustProject/Learn-Vulkan-Renderer/Docs/Vulkan-Learning/05-Development-Plans/README.md)
+- 知识图谱
+  - [知识图谱索引](/e:/RustProject/Learn-Vulkan-Renderer/Docs/Knowledge-Graph/README.md)
 
 ## 六个核心模块
 
@@ -31,6 +33,7 @@
 3. 做实现时只看第三层和第四层，把大问题压成单次可完成的任务。
 4. 开工前对照第五层，先写测试、验证层检查方式和验收标准，再开始编码。
 5. 每次只推进一个子任务，保持“一次只吃透一个 GPU 机制”的节奏。
+6. 每完成一个子任务，同步更新 [知识图谱](/e:/RustProject/Learn-Vulkan-Renderer/Docs/Knowledge-Graph/README.md) 中对应的架构图、类图或时序图。
 
 ## 参考基线
 
