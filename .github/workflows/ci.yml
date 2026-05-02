@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  issues:
+    types: [opened, edited, assigned, unassigned, reopened]
+  pull_request:
+    branches: [master]
+    types: [opened, edited, synchronize, reopened, assigned, unassigned, ready_for_review]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  governance:
+    name: Governance rules
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issues' || github.event_name == 'pull_request'
+    steps:
+      - name: Check issue and pull request rules
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const allowedTypes = "build|ci|docs|feat|fix|perf|refactor|test|demo|bench";
+            const issueTitlePattern = new RegExp(`^(${allowedTypes}): .+`);
+            const commitPattern = new RegExp(`^(${allowedTypes}): .+ \\(#(\\d+)\\)`);
+
+            const fail = (message) => core.setFailed(message);
+
+            if (context.eventName === "issues") {
+              const issue = context.payload.issue;
+
+              if (!issueTitlePattern.test(issue.title)) {
+                fail(`Issue title must match "<type>: <short summary>". Got: "${issue.title}"`);
+                return;
+              }
+
+              if (!issue.assignees || issue.assignees.length < 1) {
+                fail("Issue must have at least one assignee.");
+                return;
+              }
+
+              return;
+            }
+
+            const pr = context.payload.pull_request;
+
+            if (pr.base.ref !== "master") {
+              fail(`Pull request target branch must be master. Got: ${pr.base.ref}`);
+              return;
+            }
+
+            if (!pr.assignees || pr.assignees.length < 1) {
+              fail("Pull request must have at least one assignee.");
+              return;
+            }
+
+            const branchMatch = pr.head.ref.match(/^(\d+)[-_\/].+/);
+            if (!branchMatch) {
+              fail(`Pull request branch must start with an issue id, for example "12-vulkan-bootstrap". Got: ${pr.head.ref}`);
+              return;
+            }
+
+            const branchIssueId = Number(branchMatch[1]);
+            const {owner, repo} = context.repo;
+
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner,
+              repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            const nonMergeCommits = commits.filter((commit) => commit.parents.length <= 1);
+            if (nonMergeCommits.length !== 1) {
+              fail(`Pull request must contain exactly one non-merge commit. Got: ${nonMergeCommits.length}`);
+              return;
+            }
+
+            const message = nonMergeCommits[0].commit.message.split("\n", 1)[0];
+            const commitMatch = message.match(commitPattern);
+            if (!commitMatch) {
+              fail(`Commit title must match "<type>: <short summary> (#<issue ID>)". Got: "${message}"`);
+              return;
+            }
+
+            const commitIssueId = Number(commitMatch[2]);
+            if (commitIssueId !== branchIssueId) {
+              fail(`Commit issue id #${commitIssueId} must match branch issue id #${branchIssueId}.`);
+              return;
+            }
+
+            const {data: issue} = await github.rest.issues.get({
+              owner,
+              repo,
+              issue_number: commitIssueId,
+            });
+
+            if (issue.pull_request) {
+              fail(`#${commitIssueId} is a pull request, not an issue.`);
+              return;
+            }
+
+            if (!issueTitlePattern.test(issue.title)) {
+              fail(`Linked issue title must match "<type>: <short summary>". Got: "${issue.title}"`);
+              return;
+            }
+
+            if (!issue.assignees || issue.assignees.length < 1) {
+              fail(`Linked issue #${commitIssueId} must have at least one assignee.`);
+            }
+
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-targets
