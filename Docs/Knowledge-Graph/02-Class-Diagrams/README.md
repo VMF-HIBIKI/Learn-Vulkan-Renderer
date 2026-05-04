@@ -20,4 +20,5 @@
 - [M1-S8 Logical Device And Queues 类图](m1-s8-logical-device.md)
 - [M1-S9 Swapchain Configuration 类图](m1-s9-swapchain-config.md)
 - [M1-S10 Swapchain Image Views 类图](m1-s10-swapchain-image-views.md)
+- [M1-S11 Resize Swapchain Recreate 类图](m1-s11-resize-recreate.md)
 

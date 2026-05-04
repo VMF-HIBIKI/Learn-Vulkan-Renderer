@@ -26,7 +26,7 @@ pub use surface::{SurfaceBootstrap, SurfaceError, run_surface_shell};
 pub use swapchain::{
     SwapchainBundle, SwapchainConfig, SwapchainError, SwapchainSupportDetails,
     choose_swapchain_config, create_swapchain_bundle, query_swapchain_support_details,
-    run_swapchain_config_shell, run_swapchain_shell,
+    run_resizable_swapchain_shell, run_swapchain_config_shell, run_swapchain_shell,
 };
 pub use window::{WindowConfig, run_window_shell};
 
