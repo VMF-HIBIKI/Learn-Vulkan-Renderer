@@ -3,12 +3,16 @@
 //! 这个 crate 先作为学习型渲染器的代码实验场存在。具体 Vulkan 绑定、
 //! 资源封装、渲染图和光追模块会随着 `Docs/Vulkan-Learning` 的计划逐步落地。
 
+pub mod commands;
 pub mod device;
 pub mod instance;
 pub mod surface;
 pub mod swapchain;
 pub mod window;
 
+pub use commands::{
+    ClearCommandBundle, CommandError, create_clear_command_bundle, run_clear_command_shell,
+};
 pub use device::{
     DeviceError, DeviceExtensionSupport, LogicalDevice, PhysicalDeviceFeatureMatrix,
     PhysicalDeviceInfo, QueueFamilyIndices, QueueFamilyReport, QueueFamilySupport,
