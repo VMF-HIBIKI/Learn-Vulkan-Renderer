@@ -97,6 +97,49 @@ pub struct SwapchainSupportSummary {
 }
 
 #[derive(Debug, Clone)]
+pub struct DeviceExtensionSupport {
+    pub swapchain: bool,
+    pub acceleration_structure: bool,
+    pub ray_tracing_pipeline: bool,
+    pub deferred_host_operations: bool,
+    pub buffer_device_address: bool,
+    pub spirv_1_4: bool,
+    pub shader_float_controls: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RayTracingFeatureSupport {
+    pub acceleration_structure: bool,
+    pub ray_tracing_pipeline: bool,
+    pub ray_traversal_primitive_culling: bool,
+    pub buffer_device_address: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysicalDeviceFeatureMatrix {
+    pub extensions: DeviceExtensionSupport,
+    pub ray_tracing_features: RayTracingFeatureSupport,
+}
+
+impl PhysicalDeviceFeatureMatrix {
+    pub fn swapchain_ready(&self) -> bool {
+        self.extensions.swapchain
+    }
+
+    pub fn ray_tracing_ready(&self) -> bool {
+        self.extensions.acceleration_structure
+            && self.extensions.ray_tracing_pipeline
+            && self.extensions.deferred_host_operations
+            && self.extensions.buffer_device_address
+            && self.extensions.spirv_1_4
+            && self.extensions.shader_float_controls
+            && self.ray_tracing_features.acceleration_structure
+            && self.ray_tracing_features.ray_tracing_pipeline
+            && self.ray_tracing_features.buffer_device_address
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct PhysicalDeviceInfo {
     pub handle: vk::PhysicalDevice,
     pub name: String,
@@ -254,6 +297,85 @@ pub fn query_swapchain_support_summary(
     })
 }
 
+pub fn query_physical_device_feature_matrix(
+    vulkan_instance: &VulkanInstance,
+    physical_device: vk::PhysicalDevice,
+) -> Result<PhysicalDeviceFeatureMatrix, DeviceError> {
+    // SAFETY: `physical_device` was returned by this live instance; ash owns the output Vec.
+    let extension_properties = unsafe {
+        vulkan_instance
+            .handle()
+            .enumerate_device_extension_properties(physical_device)?
+    };
+    let extensions = DeviceExtensionSupport {
+        swapchain: device_extension_available(&extension_properties, ash::khr::swapchain::NAME),
+        acceleration_structure: device_extension_available(
+            &extension_properties,
+            ash::khr::acceleration_structure::NAME,
+        ),
+        ray_tracing_pipeline: device_extension_available(
+            &extension_properties,
+            ash::khr::ray_tracing_pipeline::NAME,
+        ),
+        deferred_host_operations: device_extension_available(
+            &extension_properties,
+            ash::khr::deferred_host_operations::NAME,
+        ),
+        buffer_device_address: device_extension_available(
+            &extension_properties,
+            ash::khr::buffer_device_address::NAME,
+        ),
+        spirv_1_4: device_extension_available(&extension_properties, ash::khr::spirv_1_4::NAME),
+        shader_float_controls: device_extension_available(
+            &extension_properties,
+            ash::khr::shader_float_controls::NAME,
+        ),
+    };
+
+    let mut acceleration_structure_features =
+        vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+    let mut ray_tracing_pipeline_features =
+        vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default();
+    let mut buffer_device_address_features =
+        vk::PhysicalDeviceBufferDeviceAddressFeatures::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut acceleration_structure_features)
+        .push_next(&mut ray_tracing_pipeline_features)
+        .push_next(&mut buffer_device_address_features);
+
+    // SAFETY: the feature structs are valid `pNext` chain nodes and live for the duration
+    // of this call; `physical_device` belongs to this instance.
+    unsafe {
+        vulkan_instance
+            .handle()
+            .get_physical_device_features2(physical_device, &mut features);
+    }
+
+    Ok(PhysicalDeviceFeatureMatrix {
+        extensions,
+        ray_tracing_features: RayTracingFeatureSupport {
+            acceleration_structure: acceleration_structure_features.acceleration_structure
+                == vk::TRUE,
+            ray_tracing_pipeline: ray_tracing_pipeline_features.ray_tracing_pipeline == vk::TRUE,
+            ray_traversal_primitive_culling: ray_tracing_pipeline_features
+                .ray_traversal_primitive_culling
+                == vk::TRUE,
+            buffer_device_address: buffer_device_address_features.buffer_device_address == vk::TRUE,
+        },
+    })
+}
+
+fn device_extension_available(
+    extension_properties: &[vk::ExtensionProperties],
+    required_extension: &CStr,
+) -> bool {
+    extension_properties.iter().any(|extension| {
+        // SAFETY: Vulkan guarantees `extension_name` is a nul-terminated fixed-size C string.
+        let extension_name = unsafe { CStr::from_ptr(extension.extension_name.as_ptr()) };
+        extension_name == required_extension
+    })
+}
+
 pub fn run_physical_device_shell(config: WindowConfig) -> Result<(), DeviceError> {
     let event_loop = EventLoop::new().map_err(VulkanInstanceError::from)?;
     let mut app = PhysicalDeviceShell::new(config);
@@ -267,6 +389,16 @@ pub fn run_physical_device_shell(config: WindowConfig) -> Result<(), DeviceError
 pub fn run_queue_support_shell(config: WindowConfig) -> Result<(), DeviceError> {
     let event_loop = EventLoop::new().map_err(VulkanInstanceError::from)?;
     let mut app = QueueSupportShell::new(config);
+
+    event_loop
+        .run_app(&mut app)
+        .map_err(VulkanInstanceError::from)?;
+    app.result
+}
+
+pub fn run_feature_matrix_shell(config: WindowConfig) -> Result<(), DeviceError> {
+    let event_loop = EventLoop::new().map_err(VulkanInstanceError::from)?;
+    let mut app = FeatureMatrixShell::new(config);
 
     event_loop
         .run_app(&mut app)
@@ -514,5 +646,136 @@ impl ApplicationHandler for QueueSupportShell {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.surface = None;
+    }
+}
+
+#[derive(Debug)]
+struct FeatureMatrixShell {
+    config: WindowConfig,
+    vulkan_instance: Option<VulkanInstance>,
+    window: Option<Window>,
+    result: Result<(), DeviceError>,
+}
+
+impl FeatureMatrixShell {
+    fn new(config: WindowConfig) -> Self {
+        Self {
+            config,
+            vulkan_instance: None,
+            window: None,
+            result: Ok(()),
+        }
+    }
+
+    fn create_instance_and_report_features(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<(), DeviceError> {
+        if self.vulkan_instance.is_some() {
+            return Ok(());
+        }
+
+        if self.window.is_none() {
+            self.window = Some(
+                event_loop
+                    .create_window(self.config.attributes())
+                    .map_err(VulkanInstanceError::from)?,
+            );
+        }
+
+        let window = self
+            .window
+            .as_ref()
+            .expect("window was created before feature matrix query");
+        let display_handle = window
+            .display_handle()
+            .map_err(VulkanInstanceError::from)?
+            .as_raw();
+        let vulkan_instance =
+            VulkanInstance::new_for_display(display_handle, "learn-vulkan-renderer-m1-s7")?;
+        let physical_devices = enumerate_physical_devices(&vulkan_instance)?;
+
+        println!(
+            "M1-S7 checking extension/feature matrix for {} physical device(s)",
+            physical_devices.len()
+        );
+
+        for physical_device in &physical_devices {
+            let matrix =
+                query_physical_device_feature_matrix(&vulkan_instance, physical_device.handle)?;
+
+            println!("  {}", physical_device.name);
+            println!(
+                "    required swapchain extension: {}",
+                matrix.extensions.swapchain
+            );
+            println!(
+                "    ray tracing extensions: as={}, rtp={}, deferred_host={}, bda={}, spirv14={}, shader_float_controls={}",
+                matrix.extensions.acceleration_structure,
+                matrix.extensions.ray_tracing_pipeline,
+                matrix.extensions.deferred_host_operations,
+                matrix.extensions.buffer_device_address,
+                matrix.extensions.spirv_1_4,
+                matrix.extensions.shader_float_controls
+            );
+            println!(
+                "    ray tracing features: as={}, rtp={}, culling={}, bda={}",
+                matrix.ray_tracing_features.acceleration_structure,
+                matrix.ray_tracing_features.ray_tracing_pipeline,
+                matrix.ray_tracing_features.ray_traversal_primitive_culling,
+                matrix.ray_tracing_features.buffer_device_address
+            );
+            println!(
+                "    readiness: swapchain={}, ray_tracing={}",
+                matrix.swapchain_ready(),
+                matrix.ray_tracing_ready()
+            );
+        }
+
+        self.vulkan_instance = Some(vulkan_instance);
+
+        Ok(())
+    }
+
+    fn record_error_and_exit(&mut self, event_loop: &ActiveEventLoop, error: DeviceError) {
+        eprintln!("M1-S7 feature matrix query failed: {error}");
+        self.result = Err(error);
+        event_loop.exit();
+    }
+}
+
+impl ApplicationHandler for FeatureMatrixShell {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(error) = self.create_instance_and_report_features(event_loop) {
+            self.record_error_and_exit(event_loop, error);
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(window) = &self.window else {
+            return;
+        };
+
+        if window.id() != window_id {
+            return;
+        }
+
+        if matches!(event, WindowEvent::CloseRequested) {
+            println!("M1-S7 window close requested");
+            event_loop.exit();
+        }
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.vulkan_instance = None;
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.vulkan_instance = None;
     }
 }

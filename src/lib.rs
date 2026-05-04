@@ -9,9 +9,11 @@ pub mod surface;
 pub mod window;
 
 pub use device::{
-    DeviceError, PhysicalDeviceInfo, QueueFamilyIndices, QueueFamilyReport, QueueFamilySupport,
-    SwapchainSupportSummary, enumerate_physical_devices, query_queue_family_support,
-    query_swapchain_support_summary, run_physical_device_shell, run_queue_support_shell,
+    DeviceError, DeviceExtensionSupport, PhysicalDeviceFeatureMatrix, PhysicalDeviceInfo,
+    QueueFamilyIndices, QueueFamilyReport, QueueFamilySupport, RayTracingFeatureSupport,
+    SwapchainSupportSummary, enumerate_physical_devices, query_physical_device_feature_matrix,
+    query_queue_family_support, query_swapchain_support_summary, run_feature_matrix_shell,
+    run_physical_device_shell, run_queue_support_shell,
 };
 pub use instance::{
     VulkanInstance, VulkanInstanceConfig, VulkanInstanceError, run_instance_shell,
