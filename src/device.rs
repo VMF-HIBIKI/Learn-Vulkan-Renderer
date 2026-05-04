@@ -186,6 +186,15 @@ impl LogicalDevice {
     pub fn queue_indices(&self) -> QueueFamilyIndices {
         self.queue_indices
     }
+
+    pub fn wait_idle(&self) -> Result<(), DeviceError> {
+        // SAFETY: waiting idle is valid for a live logical device and synchronizes all queues.
+        unsafe {
+            self.device.device_wait_idle()?;
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for LogicalDevice {

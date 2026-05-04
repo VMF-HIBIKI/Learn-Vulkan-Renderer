@@ -335,6 +335,17 @@ pub fn run_swapchain_shell(config: WindowConfig) -> Result<(), SwapchainError> {
     app.result
 }
 
+pub fn run_resizable_swapchain_shell(config: WindowConfig) -> Result<(), SwapchainError> {
+    let event_loop = EventLoop::new().map_err(VulkanInstanceError::from)?;
+    let mut app = ResizableSwapchainShell::new(config);
+
+    event_loop
+        .run_app(&mut app)
+        .map_err(VulkanInstanceError::from)
+        .map_err(DeviceError::from)?;
+    app.result
+}
+
 #[derive(Debug)]
 struct SwapchainConfigShell {
     config: WindowConfig,
@@ -563,6 +574,184 @@ impl ApplicationHandler for SwapchainShell {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.swapchain = None;
         self.logical_device = None;
+        self.surface = None;
+    }
+}
+
+#[derive(Debug)]
+struct ResizableSwapchainShell {
+    config: WindowConfig,
+    swapchain: Option<SwapchainBundle>,
+    logical_device: Option<LogicalDevice>,
+    selected_device: Option<SelectedPhysicalDevice>,
+    surface: Option<SurfaceBootstrap>,
+    window: Option<Window>,
+    resize_pending: bool,
+    result: Result<(), SwapchainError>,
+}
+
+impl ResizableSwapchainShell {
+    fn new(config: WindowConfig) -> Self {
+        Self {
+            config,
+            swapchain: None,
+            logical_device: None,
+            selected_device: None,
+            surface: None,
+            window: None,
+            resize_pending: false,
+            result: Ok(()),
+        }
+    }
+
+    fn create_initial_resources(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<(), SwapchainError> {
+        if self.swapchain.is_some() {
+            return Ok(());
+        }
+
+        if self.window.is_none() {
+            self.window = Some(
+                event_loop
+                    .create_window(self.config.attributes())
+                    .map_err(VulkanInstanceError::from)
+                    .map_err(DeviceError::from)?,
+            );
+        }
+
+        let window = self
+            .window
+            .as_ref()
+            .expect("window was created before resizable swapchain setup");
+        let surface = SurfaceBootstrap::new(window).map_err(DeviceError::from)?;
+        let selected_device = select_physical_device(
+            surface.vulkan_instance(),
+            surface.surface_loader(),
+            surface.surface(),
+        )?;
+        let logical_device = create_logical_device(surface.vulkan_instance(), &selected_device)?;
+        let swapchain = create_swapchain_bundle(
+            &surface,
+            &logical_device,
+            &selected_device,
+            window.inner_size(),
+        )?;
+
+        println!(
+            "M1-S11 initial swapchain: images={}, image_views={}, extent={}x{}",
+            swapchain.images().len(),
+            swapchain.image_views().len(),
+            swapchain.config().extent.width,
+            swapchain.config().extent.height
+        );
+
+        self.swapchain = Some(swapchain);
+        self.logical_device = Some(logical_device);
+        self.selected_device = Some(selected_device);
+        self.surface = Some(surface);
+
+        Ok(())
+    }
+
+    fn recreate_swapchain(&mut self) -> Result<(), SwapchainError> {
+        let Some(window) = &self.window else {
+            return Ok(());
+        };
+        let size = window.inner_size();
+
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
+
+        let logical_device = self
+            .logical_device
+            .as_ref()
+            .expect("logical device exists before swapchain recreate");
+        let surface = self
+            .surface
+            .as_ref()
+            .expect("surface exists before swapchain recreate");
+        let selected_device = self
+            .selected_device
+            .as_ref()
+            .expect("selected device exists before swapchain recreate");
+
+        logical_device.wait_idle().map_err(SwapchainError::from)?;
+        self.swapchain = None;
+        let swapchain = create_swapchain_bundle(surface, logical_device, selected_device, size)?;
+
+        println!(
+            "M1-S11 recreated swapchain: images={}, image_views={}, extent={}x{}",
+            swapchain.images().len(),
+            swapchain.image_views().len(),
+            swapchain.config().extent.width,
+            swapchain.config().extent.height
+        );
+
+        self.swapchain = Some(swapchain);
+        self.resize_pending = false;
+
+        Ok(())
+    }
+
+    fn record_error_and_exit(&mut self, event_loop: &ActiveEventLoop, error: SwapchainError) {
+        eprintln!("M1-S11 resize/recreate failed: {error}");
+        self.result = Err(error);
+        event_loop.exit();
+    }
+}
+
+impl ApplicationHandler for ResizableSwapchainShell {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(error) = self.create_initial_resources(event_loop) {
+            self.record_error_and_exit(event_loop, error);
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(window) = &self.window else {
+            return;
+        };
+
+        if window.id() != window_id {
+            return;
+        }
+
+        match event {
+            WindowEvent::CloseRequested => {
+                println!("M1-S11 window close requested");
+                event_loop.exit();
+            }
+            WindowEvent::Resized(size) => {
+                self.resize_pending = true;
+                println!("M1-S11 resize requested: {}x{}", size.width, size.height);
+
+                if let Err(error) = self.recreate_swapchain() {
+                    self.record_error_and_exit(event_loop, error);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.swapchain = None;
+        self.logical_device = None;
+        self.selected_device = None;
+        self.surface = None;
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.swapchain = None;
+        self.logical_device = None;
+        self.selected_device = None;
         self.surface = None;
     }
 }
