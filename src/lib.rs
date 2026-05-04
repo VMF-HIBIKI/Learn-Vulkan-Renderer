@@ -10,12 +10,13 @@ pub mod swapchain;
 pub mod window;
 
 pub use device::{
-    DeviceError, DeviceExtensionSupport, PhysicalDeviceFeatureMatrix, PhysicalDeviceInfo,
-    QueueFamilyIndices, QueueFamilyReport, QueueFamilySupport, RayTracingFeatureSupport,
-    SelectedPhysicalDevice, SwapchainSupportSummary, create_logical_device,
-    enumerate_physical_devices, query_physical_device_feature_matrix, query_queue_family_support,
-    query_swapchain_support_summary, run_feature_matrix_shell, run_logical_device_shell,
-    run_physical_device_shell, run_queue_support_shell, select_physical_device,
+    DeviceError, DeviceExtensionSupport, LogicalDevice, PhysicalDeviceFeatureMatrix,
+    PhysicalDeviceInfo, QueueFamilyIndices, QueueFamilyReport, QueueFamilySupport,
+    RayTracingFeatureSupport, SelectedPhysicalDevice, SwapchainSupportSummary,
+    create_logical_device, enumerate_physical_devices, query_physical_device_feature_matrix,
+    query_queue_family_support, query_swapchain_support_summary, run_feature_matrix_shell,
+    run_logical_device_shell, run_physical_device_shell, run_queue_support_shell,
+    select_physical_device,
 };
 pub use instance::{
     VulkanInstance, VulkanInstanceConfig, VulkanInstanceError, run_instance_shell,
@@ -23,8 +24,9 @@ pub use instance::{
 };
 pub use surface::{SurfaceBootstrap, SurfaceError, run_surface_shell};
 pub use swapchain::{
-    SwapchainConfig, SwapchainError, SwapchainSupportDetails, choose_swapchain_config,
-    query_swapchain_support_details, run_swapchain_config_shell,
+    SwapchainBundle, SwapchainConfig, SwapchainError, SwapchainSupportDetails,
+    choose_swapchain_config, create_swapchain_bundle, query_swapchain_support_details,
+    run_swapchain_config_shell, run_swapchain_shell,
 };
 pub use window::{WindowConfig, run_window_shell};
 
