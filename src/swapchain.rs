@@ -110,6 +110,10 @@ impl SwapchainBundle {
     pub fn config(&self) -> SwapchainConfig {
         self.config
     }
+
+    pub fn loader(&self) -> &SwapchainLoader {
+        &self.swapchain_loader
+    }
 }
 
 impl Drop for SwapchainBundle {

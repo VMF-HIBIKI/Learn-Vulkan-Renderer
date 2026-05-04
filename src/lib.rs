@@ -11,7 +11,8 @@ pub mod swapchain;
 pub mod window;
 
 pub use commands::{
-    ClearCommandBundle, CommandError, create_clear_command_bundle, run_clear_command_shell,
+    ClearCommandBundle, CommandError, FrameSync, create_clear_command_bundle, draw_clear_frame,
+    run_clear_command_shell, run_present_loop_shell,
 };
 pub use device::{
     DeviceError, DeviceExtensionSupport, LogicalDevice, PhysicalDeviceFeatureMatrix,
