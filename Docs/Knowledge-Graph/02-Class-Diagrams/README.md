@@ -14,4 +14,5 @@
 - [M1-S2 Vulkan Surface 类图](m1-s2-vulkan-surface.md)
 - [M1-S3 Vulkan Instance 类图](m1-s3-vulkan-instance.md)
 - [M1-S4 Vulkan Validation Logging 类图](m1-s4-validation-logging.md)
+- [M1-S5 Physical Device Enumeration 类图](m1-s5-physical-devices.md)
 
