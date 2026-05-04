@@ -18,4 +18,5 @@
 - [M1-S6 Queue And Swapchain Support 类图](m1-s6-queue-swapchain-support.md)
 - [M1-S7 Device Extension And Feature Matrix 类图](m1-s7-feature-matrix.md)
 - [M1-S8 Logical Device And Queues 类图](m1-s8-logical-device.md)
+- [M1-S9 Swapchain Configuration 类图](m1-s9-swapchain-config.md)
 
