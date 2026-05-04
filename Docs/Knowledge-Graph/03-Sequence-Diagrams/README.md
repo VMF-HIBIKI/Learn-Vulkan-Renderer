@@ -11,4 +11,5 @@
 
 - [M1-S1 桌面窗口壳时序图](m1-s1-window-shell.md)
 - [M1-S2 Vulkan Surface 时序图](m1-s2-vulkan-surface.md)
+- [M1-S3 Vulkan Instance 时序图](m1-s3-vulkan-instance.md)
 

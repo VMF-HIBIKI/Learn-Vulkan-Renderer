@@ -1,10 +1,9 @@
 use std::{
     error::Error,
-    ffi::CString,
     fmt::{Debug, Display, Formatter},
 };
 
-use ash::{Entry, Instance, khr::surface::Instance as SurfaceLoader, vk};
+use ash::{khr::surface::Instance as SurfaceLoader, vk};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -13,14 +12,14 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::WindowConfig;
+use crate::{VulkanInstance, VulkanInstanceError, WindowConfig};
 
 #[derive(Debug)]
 pub enum SurfaceError {
     EventLoop(winit::error::EventLoopError),
     Window(winit::error::OsError),
     WindowHandle(HandleError),
-    VulkanLoader(ash::LoadingError),
+    Instance(VulkanInstanceError),
     Vulkan(vk::Result),
 }
 
@@ -32,7 +31,7 @@ impl Display for SurfaceError {
             Self::WindowHandle(error) => {
                 write!(formatter, "raw window/display handle error: {error}")
             }
-            Self::VulkanLoader(error) => write!(formatter, "failed to load Vulkan loader: {error}"),
+            Self::Instance(error) => write!(formatter, "Vulkan instance error: {error}"),
             Self::Vulkan(error) => write!(formatter, "Vulkan error: {error:?}"),
         }
     }
@@ -58,9 +57,9 @@ impl From<HandleError> for SurfaceError {
     }
 }
 
-impl From<ash::LoadingError> for SurfaceError {
-    fn from(error: ash::LoadingError) -> Self {
-        Self::VulkanLoader(error)
+impl From<VulkanInstanceError> for SurfaceError {
+    fn from(error: VulkanInstanceError) -> Self {
+        Self::Instance(error)
     }
 }
 
@@ -70,13 +69,12 @@ impl From<vk::Result> for SurfaceError {
     }
 }
 
-/// M1-S2 的最小 surface bootstrap。
+/// M1-S2/M1-S3 的最小 surface bootstrap。
 ///
-/// 这个类型只验证 window handle 到 `VkSurfaceKHR` 的路径。正式的
-/// `VulkanInstance` 抽象、validation layer 和 debug messenger 留给 M1-S3/M1-S4。
+/// surface 仍归这个类型管理；`Entry` 与 `VkInstance` 的 owner 已经在 M1-S3
+/// 提升为 `VulkanInstance`，后续 validation/debug utils 会继续接入那里。
 pub struct SurfaceBootstrap {
-    _entry: Entry,
-    instance: Instance,
+    _vulkan_instance: VulkanInstance,
     surface_loader: SurfaceLoader,
     surface: vk::SurfaceKHR,
 }
@@ -95,40 +93,25 @@ impl SurfaceBootstrap {
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
 
-        // SAFETY: `Entry::load` only loads function pointers from the platform Vulkan loader.
-        // The returned `Entry` owns no Vulkan object and is kept alive for the instance lifetime.
-        let entry = unsafe { Entry::load()? };
-
-        let extension_names = ash_window::enumerate_required_extensions(display_handle)?;
-        let app_name =
-            CString::new("learn-vulkan-renderer-m1-s2").expect("static app name has no nul");
-        let engine_name =
-            CString::new("learn-vulkan-renderer").expect("static engine name has no nul");
-        let app_info = vk::ApplicationInfo::default()
-            .application_name(&app_name)
-            .application_version(0)
-            .engine_name(&engine_name)
-            .engine_version(0)
-            .api_version(vk::make_api_version(0, 1, 0, 0));
-        let instance_info = vk::InstanceCreateInfo::default()
-            .application_info(&app_info)
-            .enabled_extension_names(extension_names);
-
-        // SAFETY: `instance_info` points to live stack data for the duration of the call, and
-        // required platform surface extensions from `ash-window` are enabled.
-        let instance = unsafe { entry.create_instance(&instance_info, None)? };
-        let surface_loader = SurfaceLoader::new(&entry, &instance);
+        let vulkan_instance =
+            VulkanInstance::new_for_display(display_handle, "learn-vulkan-renderer-m1-s2")?;
+        let surface_loader = SurfaceLoader::new(vulkan_instance.entry(), vulkan_instance.handle());
 
         // SAFETY: both raw handles come from the live `winit::Window`, and that window remains
         // owned by the application shell while this `SurfaceBootstrap` exists. The instance was
         // created with the extensions returned for the same display handle.
         let surface = unsafe {
-            ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)?
+            ash_window::create_surface(
+                vulkan_instance.entry(),
+                vulkan_instance.handle(),
+                display_handle,
+                window_handle,
+                None,
+            )?
         };
 
         Ok(Self {
-            _entry: entry,
-            instance,
+            _vulkan_instance: vulkan_instance,
             surface_loader,
             surface,
         })
@@ -145,7 +128,6 @@ impl Drop for SurfaceBootstrap {
         // Destroying the surface before the instance preserves Vulkan parent/child lifetime rules.
         unsafe {
             self.surface_loader.destroy_surface(self.surface, None);
-            self.instance.destroy_instance(None);
         }
     }
 }
