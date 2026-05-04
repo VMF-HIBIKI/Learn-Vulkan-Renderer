@@ -7,7 +7,10 @@ pub mod instance;
 pub mod surface;
 pub mod window;
 
-pub use instance::{VulkanInstance, VulkanInstanceError, run_instance_shell};
+pub use instance::{
+    VulkanInstance, VulkanInstanceConfig, VulkanInstanceError, run_instance_shell,
+    run_validation_shell,
+};
 pub use surface::{SurfaceBootstrap, SurfaceError, run_surface_shell};
 pub use window::{WindowConfig, run_window_shell};
 
