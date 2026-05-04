@@ -4,7 +4,7 @@ use std::{
     fmt::{Debug, Display, Formatter},
 };
 
-use ash::vk;
+use ash::{Device as AshDevice, vk};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -22,6 +22,7 @@ pub enum DeviceError {
     Vulkan(vk::Result),
     NoPhysicalDevices,
     NoSuitableQueueFamilies,
+    NoSuitablePhysicalDevice,
 }
 
 impl Display for DeviceError {
@@ -35,6 +36,12 @@ impl Display for DeviceError {
                 write!(
                     formatter,
                     "no device has both graphics and present queue support"
+                )
+            }
+            Self::NoSuitablePhysicalDevice => {
+                write!(
+                    formatter,
+                    "no physical device satisfies renderer requirements"
                 )
             }
         }
@@ -70,6 +77,22 @@ pub struct QueueFamilyIndices {
 impl QueueFamilyIndices {
     pub fn is_complete(&self) -> bool {
         self.graphics_family.is_some() && self.present_family.is_some()
+    }
+
+    pub fn unique_indices(&self) -> Vec<u32> {
+        let mut indices = Vec::with_capacity(2);
+
+        if let Some(graphics_family) = self.graphics_family {
+            indices.push(graphics_family);
+        }
+
+        if let Some(present_family) = self.present_family
+            && !indices.contains(&present_family)
+        {
+            indices.push(present_family);
+        }
+
+        indices
     }
 }
 
@@ -119,6 +142,60 @@ pub struct RayTracingFeatureSupport {
 pub struct PhysicalDeviceFeatureMatrix {
     pub extensions: DeviceExtensionSupport,
     pub ray_tracing_features: RayTracingFeatureSupport,
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectedPhysicalDevice {
+    pub info: PhysicalDeviceInfo,
+    pub queue_indices: QueueFamilyIndices,
+    pub swapchain_support: SwapchainSupportSummary,
+    pub feature_matrix: PhysicalDeviceFeatureMatrix,
+}
+
+pub struct LogicalDevice {
+    device: AshDevice,
+    graphics_queue: vk::Queue,
+    present_queue: vk::Queue,
+    queue_indices: QueueFamilyIndices,
+}
+
+impl Debug for LogicalDevice {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LogicalDevice")
+            .field("graphics_queue", &self.graphics_queue)
+            .field("present_queue", &self.present_queue)
+            .field("queue_indices", &self.queue_indices)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LogicalDevice {
+    pub fn handle(&self) -> &AshDevice {
+        &self.device
+    }
+
+    pub fn graphics_queue(&self) -> vk::Queue {
+        self.graphics_queue
+    }
+
+    pub fn present_queue(&self) -> vk::Queue {
+        self.present_queue
+    }
+
+    pub fn queue_indices(&self) -> QueueFamilyIndices {
+        self.queue_indices
+    }
+}
+
+impl Drop for LogicalDevice {
+    fn drop(&mut self) {
+        // SAFETY: `LogicalDevice` 是 `VkDevice` 的唯一 owner。
+        // 后续 device child objects 必须在这个 owner drop 之前销毁。
+        unsafe {
+            self.device.destroy_device(None);
+        }
+    }
 }
 
 impl PhysicalDeviceFeatureMatrix {
@@ -365,6 +442,95 @@ pub fn query_physical_device_feature_matrix(
     })
 }
 
+pub fn select_physical_device(
+    vulkan_instance: &VulkanInstance,
+    surface_loader: &ash::khr::surface::Instance,
+    surface: vk::SurfaceKHR,
+) -> Result<SelectedPhysicalDevice, DeviceError> {
+    let physical_devices = enumerate_physical_devices(vulkan_instance)?;
+
+    for info in physical_devices {
+        let queue_support =
+            query_queue_family_support(vulkan_instance, surface_loader, surface, info.handle)?;
+
+        if !queue_support.indices.is_complete() {
+            continue;
+        }
+
+        let feature_matrix = query_physical_device_feature_matrix(vulkan_instance, info.handle)?;
+
+        if !feature_matrix.swapchain_ready() {
+            continue;
+        }
+
+        let swapchain_support =
+            query_swapchain_support_summary(surface_loader, info.handle, surface)?;
+
+        if swapchain_support.format_count == 0 || swapchain_support.present_mode_count == 0 {
+            continue;
+        }
+
+        return Ok(SelectedPhysicalDevice {
+            info,
+            queue_indices: queue_support.indices,
+            swapchain_support,
+            feature_matrix,
+        });
+    }
+
+    Err(DeviceError::NoSuitablePhysicalDevice)
+}
+
+pub fn create_logical_device(
+    vulkan_instance: &VulkanInstance,
+    selected_device: &SelectedPhysicalDevice,
+) -> Result<LogicalDevice, DeviceError> {
+    let queue_priority = [1.0_f32];
+    let unique_queue_indices = selected_device.queue_indices.unique_indices();
+    let queue_infos = unique_queue_indices
+        .iter()
+        .map(|queue_family_index| {
+            vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(*queue_family_index)
+                .queue_priorities(&queue_priority)
+        })
+        .collect::<Vec<_>>();
+    let device_extension_names = [ash::khr::swapchain::NAME.as_ptr()];
+    let device_features = vk::PhysicalDeviceFeatures::default();
+    let device_info = vk::DeviceCreateInfo::default()
+        .queue_create_infos(&queue_infos)
+        .enabled_extension_names(&device_extension_names)
+        .enabled_features(&device_features);
+
+    // SAFETY: selected device and queue family indices were queried from this live instance.
+    // The queue info and extension pointer arrays live for the duration of the call.
+    let device = unsafe {
+        vulkan_instance
+            .handle()
+            .create_device(selected_device.info.handle, &device_info, None)?
+    };
+    let graphics_family = selected_device
+        .queue_indices
+        .graphics_family
+        .expect("selected device has graphics queue family");
+    let present_family = selected_device
+        .queue_indices
+        .present_family
+        .expect("selected device has present queue family");
+
+    // SAFETY: queues at index 0 exist because each queue create info requested one queue.
+    let graphics_queue = unsafe { device.get_device_queue(graphics_family, 0) };
+    // SAFETY: queues at index 0 exist because each queue create info requested one queue.
+    let present_queue = unsafe { device.get_device_queue(present_family, 0) };
+
+    Ok(LogicalDevice {
+        device,
+        graphics_queue,
+        present_queue,
+        queue_indices: selected_device.queue_indices,
+    })
+}
+
 fn device_extension_available(
     extension_properties: &[vk::ExtensionProperties],
     required_extension: &CStr,
@@ -399,6 +565,16 @@ pub fn run_queue_support_shell(config: WindowConfig) -> Result<(), DeviceError> 
 pub fn run_feature_matrix_shell(config: WindowConfig) -> Result<(), DeviceError> {
     let event_loop = EventLoop::new().map_err(VulkanInstanceError::from)?;
     let mut app = FeatureMatrixShell::new(config);
+
+    event_loop
+        .run_app(&mut app)
+        .map_err(VulkanInstanceError::from)?;
+    app.result
+}
+
+pub fn run_logical_device_shell(config: WindowConfig) -> Result<(), DeviceError> {
+    let event_loop = EventLoop::new().map_err(VulkanInstanceError::from)?;
+    let mut app = LogicalDeviceShell::new(config);
 
     event_loop
         .run_app(&mut app)
@@ -777,5 +953,116 @@ impl ApplicationHandler for FeatureMatrixShell {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.vulkan_instance = None;
+    }
+}
+
+#[derive(Debug)]
+struct LogicalDeviceShell {
+    config: WindowConfig,
+    logical_device: Option<LogicalDevice>,
+    surface: Option<SurfaceBootstrap>,
+    window: Option<Window>,
+    result: Result<(), DeviceError>,
+}
+
+impl LogicalDeviceShell {
+    fn new(config: WindowConfig) -> Self {
+        Self {
+            config,
+            logical_device: None,
+            surface: None,
+            window: None,
+            result: Ok(()),
+        }
+    }
+
+    fn create_surface_and_logical_device(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) -> Result<(), DeviceError> {
+        if self.logical_device.is_some() {
+            return Ok(());
+        }
+
+        if self.window.is_none() {
+            self.window = Some(
+                event_loop
+                    .create_window(self.config.attributes())
+                    .map_err(VulkanInstanceError::from)?,
+            );
+        }
+
+        let window = self
+            .window
+            .as_ref()
+            .expect("window was created before logical device bootstrap");
+        let surface = SurfaceBootstrap::new(window)?;
+        let selected_device = select_physical_device(
+            surface.vulkan_instance(),
+            surface.surface_loader(),
+            surface.surface(),
+        )?;
+        let logical_device = create_logical_device(surface.vulkan_instance(), &selected_device)?;
+
+        println!("M1-S8 selected device: {}", selected_device.info);
+        println!(
+            "M1-S8 logical device created; graphics queue {:?}, present queue {:?}",
+            logical_device.graphics_queue(),
+            logical_device.present_queue()
+        );
+        println!(
+            "M1-S8 queue families: graphics={:?}, present={:?}",
+            logical_device.queue_indices().graphics_family,
+            logical_device.queue_indices().present_family
+        );
+
+        self.logical_device = Some(logical_device);
+        self.surface = Some(surface);
+
+        Ok(())
+    }
+
+    fn record_error_and_exit(&mut self, event_loop: &ActiveEventLoop, error: DeviceError) {
+        eprintln!("M1-S8 logical device bootstrap failed: {error}");
+        self.result = Err(error);
+        event_loop.exit();
+    }
+}
+
+impl ApplicationHandler for LogicalDeviceShell {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(error) = self.create_surface_and_logical_device(event_loop) {
+            self.record_error_and_exit(event_loop, error);
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(window) = &self.window else {
+            return;
+        };
+
+        if window.id() != window_id {
+            return;
+        }
+
+        if matches!(event, WindowEvent::CloseRequested) {
+            println!("M1-S8 window close requested");
+            event_loop.exit();
+        }
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.logical_device = None;
+        self.surface = None;
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.logical_device = None;
+        self.surface = None;
     }
 }
