@@ -11,9 +11,10 @@ pub mod window;
 pub use device::{
     DeviceError, DeviceExtensionSupport, PhysicalDeviceFeatureMatrix, PhysicalDeviceInfo,
     QueueFamilyIndices, QueueFamilyReport, QueueFamilySupport, RayTracingFeatureSupport,
-    SwapchainSupportSummary, enumerate_physical_devices, query_physical_device_feature_matrix,
-    query_queue_family_support, query_swapchain_support_summary, run_feature_matrix_shell,
-    run_physical_device_shell, run_queue_support_shell,
+    SelectedPhysicalDevice, SwapchainSupportSummary, create_logical_device,
+    enumerate_physical_devices, query_physical_device_feature_matrix, query_queue_family_support,
+    query_swapchain_support_summary, run_feature_matrix_shell, run_logical_device_shell,
+    run_physical_device_shell, run_queue_support_shell, select_physical_device,
 };
 pub use instance::{
     VulkanInstance, VulkanInstanceConfig, VulkanInstanceError, run_instance_shell,
