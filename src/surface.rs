@@ -74,7 +74,7 @@ impl From<vk::Result> for SurfaceError {
 /// surface 仍归这个类型管理；`Entry` 与 `VkInstance` 的 owner 已经在 M1-S3
 /// 提升为 `VulkanInstance`，后续 validation/debug utils 会继续接入那里。
 pub struct SurfaceBootstrap {
-    _vulkan_instance: VulkanInstance,
+    vulkan_instance: VulkanInstance,
     surface_loader: SurfaceLoader,
     surface: vk::SurfaceKHR,
 }
@@ -111,7 +111,7 @@ impl SurfaceBootstrap {
         };
 
         Ok(Self {
-            _vulkan_instance: vulkan_instance,
+            vulkan_instance,
             surface_loader,
             surface,
         })
@@ -119,6 +119,14 @@ impl SurfaceBootstrap {
 
     pub fn surface(&self) -> vk::SurfaceKHR {
         self.surface
+    }
+
+    pub fn surface_loader(&self) -> &SurfaceLoader {
+        &self.surface_loader
+    }
+
+    pub fn vulkan_instance(&self) -> &VulkanInstance {
+        &self.vulkan_instance
     }
 }
 
