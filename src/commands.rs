@@ -67,6 +67,64 @@ pub struct ClearCommandBundle {
     clear_color: vk::ClearColorValue,
 }
 
+pub struct FrameSync {
+    device: AshDevice,
+    image_available: vk::Semaphore,
+    render_finished: vk::Semaphore,
+    in_flight: vk::Fence,
+}
+
+impl Debug for FrameSync {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FrameSync")
+            .field("image_available", &self.image_available)
+            .field("render_finished", &self.render_finished)
+            .field("in_flight", &self.in_flight)
+            .finish()
+    }
+}
+
+impl FrameSync {
+    pub fn new(logical_device: &LogicalDevice) -> Result<Self, CommandError> {
+        let semaphore_info = vk::SemaphoreCreateInfo::default();
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+
+        // SAFETY: synchronization objects are created from a live logical device.
+        let image_available = unsafe {
+            logical_device
+                .handle()
+                .create_semaphore(&semaphore_info, None)?
+        };
+        // SAFETY: synchronization objects are created from a live logical device.
+        let render_finished = unsafe {
+            logical_device
+                .handle()
+                .create_semaphore(&semaphore_info, None)?
+        };
+        // SAFETY: synchronization objects are created from a live logical device.
+        let in_flight = unsafe { logical_device.handle().create_fence(&fence_info, None)? };
+
+        Ok(Self {
+            device: logical_device.handle().clone(),
+            image_available,
+            render_finished,
+            in_flight,
+        })
+    }
+}
+
+impl Drop for FrameSync {
+    fn drop(&mut self) {
+        // SAFETY: sync objects were created from this live device and are not destroyed elsewhere.
+        unsafe {
+            self.device.destroy_fence(self.in_flight, None);
+            self.device.destroy_semaphore(self.render_finished, None);
+            self.device.destroy_semaphore(self.image_available, None);
+        }
+    }
+}
+
 impl Debug for ClearCommandBundle {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -137,6 +195,75 @@ pub fn create_clear_command_bundle(
     record_clear_commands(logical_device, swapchain, &bundle)?;
 
     Ok(bundle)
+}
+
+pub fn draw_clear_frame(
+    logical_device: &LogicalDevice,
+    swapchain: &SwapchainBundle,
+    commands: &ClearCommandBundle,
+    sync: &FrameSync,
+) -> Result<bool, CommandError> {
+    // SAFETY: fence belongs to this live device and synchronizes the single in-flight frame.
+    unsafe {
+        logical_device
+            .handle()
+            .wait_for_fences(&[sync.in_flight], true, u64::MAX)?;
+    }
+
+    let (image_index, acquire_suboptimal) = match unsafe {
+        swapchain.loader().acquire_next_image(
+            swapchain.swapchain(),
+            u64::MAX,
+            sync.image_available,
+            vk::Fence::null(),
+        )
+    } {
+        Ok(result) => result,
+        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => return Ok(true),
+        Err(error) => return Err(CommandError::from(error)),
+    };
+
+    // SAFETY: the previous frame has completed, so the fence can be reused for this submit.
+    unsafe {
+        logical_device.handle().reset_fences(&[sync.in_flight])?;
+    }
+
+    let wait_semaphores = [sync.image_available];
+    let wait_stages = [vk::PipelineStageFlags::TRANSFER];
+    let command_buffers = [commands.command_buffers()[image_index as usize]];
+    let signal_semaphores = [sync.render_finished];
+    let submit_info = vk::SubmitInfo::default()
+        .wait_semaphores(&wait_semaphores)
+        .wait_dst_stage_mask(&wait_stages)
+        .command_buffers(&command_buffers)
+        .signal_semaphores(&signal_semaphores);
+
+    // SAFETY: command buffer at `image_index` was recorded for that swapchain image.
+    unsafe {
+        logical_device.handle().queue_submit(
+            logical_device.graphics_queue(),
+            &[submit_info],
+            sync.in_flight,
+        )?;
+    }
+
+    let swapchains = [swapchain.swapchain()];
+    let image_indices = [image_index];
+    let present_info = vk::PresentInfoKHR::default()
+        .wait_semaphores(&signal_semaphores)
+        .swapchains(&swapchains)
+        .image_indices(&image_indices);
+    let present_suboptimal = match unsafe {
+        swapchain
+            .loader()
+            .queue_present(logical_device.present_queue(), &present_info)
+    } {
+        Ok(suboptimal) => suboptimal,
+        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => true,
+        Err(error) => return Err(CommandError::from(error)),
+    };
+
+    Ok(acquire_suboptimal || present_suboptimal)
 }
 
 fn record_clear_commands(
@@ -254,6 +381,17 @@ fn transition_image_layout(
 pub fn run_clear_command_shell(config: WindowConfig) -> Result<(), CommandError> {
     let event_loop = EventLoop::new().map_err(VulkanInstanceError::from)?;
     let mut app = ClearCommandShell::new(config);
+
+    event_loop
+        .run_app(&mut app)
+        .map_err(VulkanInstanceError::from)
+        .map_err(DeviceError::from)?;
+    app.result
+}
+
+pub fn run_present_loop_shell(config: WindowConfig) -> Result<(), CommandError> {
+    let event_loop = EventLoop::new().map_err(VulkanInstanceError::from)?;
+    let mut app = PresentLoopShell::new(config);
 
     event_loop
         .run_app(&mut app)
@@ -387,6 +525,247 @@ impl ApplicationHandler for ClearCommandShell {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.commands = None;
+        self.swapchain = None;
+        self.logical_device = None;
+        self.selected_device = None;
+        self.surface = None;
+    }
+}
+
+#[derive(Debug)]
+struct PresentLoopShell {
+    config: WindowConfig,
+    sync: Option<FrameSync>,
+    commands: Option<ClearCommandBundle>,
+    swapchain: Option<SwapchainBundle>,
+    logical_device: Option<LogicalDevice>,
+    selected_device: Option<SelectedPhysicalDevice>,
+    surface: Option<SurfaceBootstrap>,
+    window: Option<Window>,
+    framebuffer_resized: bool,
+    result: Result<(), CommandError>,
+}
+
+impl PresentLoopShell {
+    fn new(config: WindowConfig) -> Self {
+        Self {
+            config,
+            sync: None,
+            commands: None,
+            swapchain: None,
+            logical_device: None,
+            selected_device: None,
+            surface: None,
+            window: None,
+            framebuffer_resized: false,
+            result: Ok(()),
+        }
+    }
+
+    fn create_resources(&mut self, event_loop: &ActiveEventLoop) -> Result<(), CommandError> {
+        if self.swapchain.is_some() {
+            return Ok(());
+        }
+
+        if self.window.is_none() {
+            self.window = Some(
+                event_loop
+                    .create_window(self.config.attributes())
+                    .map_err(VulkanInstanceError::from)
+                    .map_err(DeviceError::from)?,
+            );
+        }
+
+        let window = self
+            .window
+            .as_ref()
+            .expect("window was created before present loop setup");
+        let surface = SurfaceBootstrap::new(window)
+            .map_err(DeviceError::from)
+            .map_err(SwapchainError::from)?;
+        let selected_device = select_physical_device(
+            surface.vulkan_instance(),
+            surface.surface_loader(),
+            surface.surface(),
+        )?;
+        let logical_device = create_logical_device(surface.vulkan_instance(), &selected_device)?;
+        let sync = FrameSync::new(&logical_device)?;
+        let swapchain = create_swapchain_bundle(
+            &surface,
+            &logical_device,
+            &selected_device,
+            window.inner_size(),
+        )?;
+        let clear_color = vk::ClearColorValue {
+            float32: [0.02, 0.08, 0.16, 1.0],
+        };
+        let commands = create_clear_command_bundle(&logical_device, &swapchain, clear_color)?;
+
+        println!(
+            "M1-S13 present loop ready: images={}, extent={}x{}",
+            swapchain.images().len(),
+            swapchain.config().extent.width,
+            swapchain.config().extent.height
+        );
+
+        self.sync = Some(sync);
+        self.commands = Some(commands);
+        self.swapchain = Some(swapchain);
+        self.logical_device = Some(logical_device);
+        self.selected_device = Some(selected_device);
+        self.surface = Some(surface);
+
+        Ok(())
+    }
+
+    fn recreate_swapchain_and_commands(&mut self) -> Result<(), CommandError> {
+        let Some(window) = &self.window else {
+            return Ok(());
+        };
+        let size = window.inner_size();
+
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
+
+        let logical_device = self
+            .logical_device
+            .as_ref()
+            .expect("logical device exists before present loop recreate");
+        let surface = self
+            .surface
+            .as_ref()
+            .expect("surface exists before present loop recreate");
+        let selected_device = self
+            .selected_device
+            .as_ref()
+            .expect("selected device exists before present loop recreate");
+
+        logical_device.wait_idle()?;
+        self.commands = None;
+        self.swapchain = None;
+        let swapchain = create_swapchain_bundle(surface, logical_device, selected_device, size)?;
+        let clear_color = vk::ClearColorValue {
+            float32: [0.02, 0.08, 0.16, 1.0],
+        };
+        let commands = create_clear_command_bundle(logical_device, &swapchain, clear_color)?;
+
+        println!(
+            "M1-S13 recreated present resources: images={}, extent={}x{}",
+            swapchain.images().len(),
+            swapchain.config().extent.width,
+            swapchain.config().extent.height
+        );
+
+        self.commands = Some(commands);
+        self.swapchain = Some(swapchain);
+        self.framebuffer_resized = false;
+
+        Ok(())
+    }
+
+    fn draw_frame(&mut self) -> Result<(), CommandError> {
+        if self.framebuffer_resized {
+            self.recreate_swapchain_and_commands()?;
+            return Ok(());
+        }
+
+        let Some(logical_device) = &self.logical_device else {
+            return Ok(());
+        };
+        let Some(swapchain) = &self.swapchain else {
+            return Ok(());
+        };
+        let Some(commands) = &self.commands else {
+            return Ok(());
+        };
+        let Some(sync) = &self.sync else {
+            return Ok(());
+        };
+
+        if draw_clear_frame(logical_device, swapchain, commands, sync)? {
+            self.recreate_swapchain_and_commands()?;
+        }
+
+        Ok(())
+    }
+
+    fn record_error_and_exit(&mut self, event_loop: &ActiveEventLoop, error: CommandError) {
+        eprintln!("M1-S13 present loop failed: {error}");
+        self.result = Err(error);
+        event_loop.exit();
+    }
+}
+
+impl ApplicationHandler for PresentLoopShell {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(error) = self.create_resources(event_loop) {
+            self.record_error_and_exit(event_loop, error);
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(window) = &self.window else {
+            return;
+        };
+
+        if window.id() != window_id {
+            return;
+        }
+
+        match event {
+            WindowEvent::CloseRequested => {
+                println!("M1-S13 window close requested");
+                event_loop.exit();
+            }
+            WindowEvent::Resized(size) => {
+                self.framebuffer_resized = true;
+                println!("M1-S13 resize requested: {}x{}", size.width, size.height);
+            }
+            WindowEvent::RedrawRequested => {
+                if let Err(error) = self.draw_frame() {
+                    self.record_error_and_exit(event_loop, error);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(logical_device) = &self.logical_device
+            && let Err(error) = logical_device.wait_idle()
+        {
+            self.result = Err(CommandError::from(error));
+        }
+
+        self.sync = None;
+        self.commands = None;
+        self.swapchain = None;
+        self.logical_device = None;
+        self.selected_device = None;
+        self.surface = None;
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(logical_device) = &self.logical_device
+            && let Err(error) = logical_device.wait_idle()
+        {
+            self.result = Err(CommandError::from(error));
+        }
+
+        self.sync = None;
         self.commands = None;
         self.swapchain = None;
         self.logical_device = None;
