@@ -1,10 +1,10 @@
 use std::{
     error::Error,
-    ffi::CString,
+    ffi::{CStr, CString, c_void},
     fmt::{Debug, Display, Formatter},
 };
 
-use ash::{Entry, Instance, vk};
+use ash::{Entry, Instance, ext::debug_utils::Instance as DebugUtilsLoader, vk};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -14,6 +14,8 @@ use winit::{
 };
 
 use crate::WindowConfig;
+
+const VALIDATION_LAYER_NAME: &str = "VK_LAYER_KHRONOS_validation";
 
 #[derive(Debug)]
 pub enum VulkanInstanceError {
@@ -70,14 +72,30 @@ impl From<vk::Result> for VulkanInstanceError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VulkanInstanceConfig {
+    pub enable_validation: bool,
+}
+
+impl Default for VulkanInstanceConfig {
+    fn default() -> Self {
+        Self {
+            enable_validation: cfg!(debug_assertions),
+        }
+    }
+}
+
 /// M1-S3 的 Vulkan instance owner。
 ///
-/// 这个类型只负责 `Entry` 与 `VkInstance` 生命周期。后续 M1-S4 会在这里
-/// 接入 validation layer 和 debug messenger，surface/device/swapchain 继续保持在外层。
+/// 这个类型负责 `Entry`、`VkInstance` 和 instance-level debug messenger 生命周期。
+/// surface/device/swapchain 继续保持在外层，避免 Vulkan 根对象反向依赖下游资源。
 pub struct VulkanInstance {
     entry: Entry,
     instance: Instance,
+    debug_utils_loader: Option<DebugUtilsLoader>,
+    debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     enabled_extension_count: usize,
+    validation_enabled: bool,
 }
 
 impl Debug for VulkanInstance {
@@ -85,6 +103,7 @@ impl Debug for VulkanInstance {
         formatter
             .debug_struct("VulkanInstance")
             .field("enabled_extension_count", &self.enabled_extension_count)
+            .field("validation_enabled", &self.validation_enabled)
             .finish_non_exhaustive()
     }
 }
@@ -94,11 +113,46 @@ impl VulkanInstance {
         display_handle: RawDisplayHandle,
         app_name: &str,
     ) -> Result<Self, VulkanInstanceError> {
+        Self::new_for_display_with_config(display_handle, app_name, VulkanInstanceConfig::default())
+    }
+
+    pub fn new_for_display_with_config(
+        display_handle: RawDisplayHandle,
+        app_name: &str,
+        config: VulkanInstanceConfig,
+    ) -> Result<Self, VulkanInstanceError> {
         // SAFETY: `Entry::load` 只从平台 Vulkan loader 加载函数指针。
         // 返回的 `Entry` 会由 `VulkanInstance` 持有，生命周期覆盖 `Instance`。
         let entry = unsafe { Entry::load()? };
 
-        let extension_names = ash_window::enumerate_required_extensions(display_handle)?;
+        let validation_layer_name =
+            CString::new(VALIDATION_LAYER_NAME).expect("static layer name has no nul");
+        let validation_enabled =
+            config.enable_validation && instance_layer_available(&entry, &validation_layer_name)?;
+
+        if config.enable_validation && !validation_enabled {
+            eprintln!(
+                "Vulkan validation layer '{VALIDATION_LAYER_NAME}' is unavailable; continuing without validation"
+            );
+        }
+
+        let mut extension_names =
+            ash_window::enumerate_required_extensions(display_handle)?.to_vec();
+        let debug_utils_available =
+            instance_extension_available(&entry, ash::ext::debug_utils::NAME)?;
+
+        if validation_enabled && debug_utils_available {
+            extension_names.push(ash::ext::debug_utils::NAME.as_ptr());
+        } else if validation_enabled {
+            eprintln!("Vulkan debug utils extension is unavailable; validation logging disabled");
+        }
+
+        let validation_enabled = validation_enabled && debug_utils_available;
+        let layer_names = if validation_enabled {
+            vec![validation_layer_name.as_ptr()]
+        } else {
+            Vec::new()
+        };
         let app_name = CString::new(app_name).expect("static app name has no nul");
         let engine_name =
             CString::new("learn-vulkan-renderer").expect("static engine name has no nul");
@@ -108,18 +162,41 @@ impl VulkanInstance {
             .engine_name(&engine_name)
             .engine_version(0)
             .api_version(vk::make_api_version(0, 1, 0, 0));
-        let instance_info = vk::InstanceCreateInfo::default()
+        let mut debug_messenger_info = debug_messenger_create_info();
+        let mut instance_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
-            .enabled_extension_names(extension_names);
+            .enabled_extension_names(&extension_names)
+            .enabled_layer_names(&layer_names);
+
+        if validation_enabled {
+            instance_info = instance_info.push_next(&mut debug_messenger_info);
+        }
 
         // SAFETY: 调用期间 `instance_info` 引用的栈上数据都保持有效。
-        // 已启用 `ash-window` 根据 display handle 返回的平台 surface 必需扩展。
+        // 已启用 `ash-window` 根据 display handle 返回的平台 surface 必需扩展；
+        // validation/debug utils 的名字来自本函数内仍存活的 `CString` 和静态扩展名。
         let instance = unsafe { entry.create_instance(&instance_info, None)? };
+        let (debug_utils_loader, debug_messenger) = if validation_enabled {
+            let debug_utils_loader = DebugUtilsLoader::new(&entry, &instance);
+
+            // SAFETY: `debug_messenger_info` 的 callback 是静态函数，loader 与 instance
+            // 会由 `VulkanInstance` 持有并晚于 messenger 销毁。
+            let debug_messenger = unsafe {
+                debug_utils_loader.create_debug_utils_messenger(&debug_messenger_info, None)?
+            };
+
+            (Some(debug_utils_loader), Some(debug_messenger))
+        } else {
+            (None, None)
+        };
 
         Ok(Self {
             entry,
             instance,
+            debug_utils_loader,
+            debug_messenger,
             enabled_extension_count: extension_names.len(),
+            validation_enabled,
         })
     }
 
@@ -134,21 +211,137 @@ impl VulkanInstance {
     pub fn enabled_extension_count(&self) -> usize {
         self.enabled_extension_count
     }
+
+    pub fn validation_enabled(&self) -> bool {
+        self.validation_enabled
+    }
+
+    pub fn submit_debug_message(&self, message: &CStr) {
+        let Some(debug_utils_loader) = &self.debug_utils_loader else {
+            return;
+        };
+
+        let message_id_name =
+            CString::new("learn-vulkan-renderer.startup").expect("static message id has no nul");
+        let callback_data = vk::DebugUtilsMessengerCallbackDataEXT::default()
+            .message_id_name(&message_id_name)
+            .message_id_number(1)
+            .message(message);
+
+        // SAFETY: debug utils loader belongs to this live instance, and callback data points to
+        // stack/CString values that remain valid for the duration of this synchronous call.
+        unsafe {
+            debug_utils_loader.submit_debug_utils_message(
+                vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL,
+                &callback_data,
+            );
+        }
+    }
 }
 
 impl Drop for VulkanInstance {
     fn drop(&mut self) {
-        // SAFETY: `VulkanInstance` 是 `VkInstance` 的唯一 owner。
-        // 调用者必须在 drop 前释放 surface/device 等 instance child objects。
+        // SAFETY: `VulkanInstance` 是 `VkInstance` 与 debug messenger 的唯一 owner。
+        // 先销毁 debug messenger，再销毁 instance，满足 extension object 的父子关系。
         unsafe {
+            if let (Some(debug_utils_loader), Some(debug_messenger)) =
+                (&self.debug_utils_loader, self.debug_messenger)
+            {
+                debug_utils_loader.destroy_debug_utils_messenger(debug_messenger, None);
+            }
+
             self.instance.destroy_instance(None);
         }
     }
 }
 
+fn instance_layer_available(
+    entry: &Entry,
+    required_layer: &CStr,
+) -> Result<bool, VulkanInstanceError> {
+    // SAFETY: 查询 instance layer properties 不依赖已创建的 Vulkan instance。
+    let layers = unsafe { entry.enumerate_instance_layer_properties()? };
+
+    Ok(layers.iter().any(|layer| {
+        // SAFETY: Vulkan 保证 `layer_name` 是以 nul 结尾的固定长度 C 字符串。
+        let layer_name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
+        layer_name == required_layer
+    }))
+}
+
+fn instance_extension_available(
+    entry: &Entry,
+    required_extension: &CStr,
+) -> Result<bool, VulkanInstanceError> {
+    // SAFETY: 查询全局 instance extension properties 不依赖已创建的 Vulkan instance。
+    let extensions = unsafe { entry.enumerate_instance_extension_properties(None)? };
+
+    Ok(extensions.iter().any(|extension| {
+        // SAFETY: Vulkan 保证 `extension_name` 是以 nul 结尾的固定长度 C 字符串。
+        let extension_name = unsafe { CStr::from_ptr(extension.extension_name.as_ptr()) };
+        extension_name == required_extension
+    }))
+}
+
+fn debug_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
+    vk::DebugUtilsMessengerCreateInfoEXT::default()
+        .message_severity(
+            vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE
+                | vk::DebugUtilsMessageSeverityFlagsEXT::INFO
+                | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+        )
+        .message_type(
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
+        .pfn_user_callback(Some(vulkan_debug_callback))
+}
+
+unsafe extern "system" fn vulkan_debug_callback(
+    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    message_types: vk::DebugUtilsMessageTypeFlagsEXT,
+    callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    _user_data: *mut c_void,
+) -> vk::Bool32 {
+    let message = if callback_data.is_null() {
+        "<no callback data>"
+    } else {
+        // SAFETY: Vulkan calls the callback with a valid callback data pointer for this invocation.
+        let message_ptr = unsafe { (*callback_data).p_message };
+
+        if message_ptr.is_null() {
+            "<no message>"
+        } else {
+            // SAFETY: Vulkan validation messages are nul-terminated C strings valid for the call.
+            unsafe { CStr::from_ptr(message_ptr) }
+                .to_str()
+                .unwrap_or("<non-utf8 validation message>")
+        }
+    };
+
+    eprintln!("[Vulkan][{message_severity:?}][{message_types:?}] {message}");
+
+    vk::FALSE
+}
+
 pub fn run_instance_shell(config: WindowConfig) -> Result<(), VulkanInstanceError> {
+    run_instance_shell_with_label(config, "M1-S3", "learn-vulkan-renderer-m1-s3")
+}
+
+pub fn run_validation_shell(config: WindowConfig) -> Result<(), VulkanInstanceError> {
+    run_instance_shell_with_label(config, "M1-S4", "learn-vulkan-renderer-m1-s4")
+}
+
+fn run_instance_shell_with_label(
+    config: WindowConfig,
+    milestone_label: &'static str,
+    app_name: &'static str,
+) -> Result<(), VulkanInstanceError> {
     let event_loop = EventLoop::new()?;
-    let mut app = InstanceShell::new(config);
+    let mut app = InstanceShell::new(config, milestone_label, app_name);
 
     event_loop.run_app(&mut app)?;
     app.result
@@ -157,15 +350,19 @@ pub fn run_instance_shell(config: WindowConfig) -> Result<(), VulkanInstanceErro
 #[derive(Debug)]
 struct InstanceShell {
     config: WindowConfig,
+    milestone_label: &'static str,
+    app_name: &'static str,
     vulkan_instance: Option<VulkanInstance>,
     window: Option<Window>,
     result: Result<(), VulkanInstanceError>,
 }
 
 impl InstanceShell {
-    fn new(config: WindowConfig) -> Self {
+    fn new(config: WindowConfig, milestone_label: &'static str, app_name: &'static str) -> Self {
         Self {
             config,
+            milestone_label,
+            app_name,
             vulkan_instance: None,
             window: None,
             result: Ok(()),
@@ -189,20 +386,30 @@ impl InstanceShell {
             .as_ref()
             .expect("window was created before Vulkan instance bootstrap");
         let display_handle = window.display_handle()?.as_raw();
-        let vulkan_instance =
-            VulkanInstance::new_for_display(display_handle, "learn-vulkan-renderer-m1-s3")?;
+        let vulkan_instance = VulkanInstance::new_for_display(display_handle, self.app_name)?;
 
         println!(
-            "M1-S3 Vulkan instance created with {} required surface extensions",
-            vulkan_instance.enabled_extension_count()
+            "{} Vulkan instance created with {} extensions; validation enabled: {}",
+            self.milestone_label,
+            vulkan_instance.enabled_extension_count(),
+            vulkan_instance.validation_enabled()
         );
+
+        let startup_message =
+            CString::new(format!("{} debug messenger is ready", self.milestone_label))
+                .expect("generated startup message has no nul");
+        vulkan_instance.submit_debug_message(&startup_message);
+
         self.vulkan_instance = Some(vulkan_instance);
 
         Ok(())
     }
 
     fn record_error_and_exit(&mut self, event_loop: &ActiveEventLoop, error: VulkanInstanceError) {
-        eprintln!("M1-S3 Vulkan instance bootstrap failed: {error}");
+        eprintln!(
+            "{} Vulkan instance bootstrap failed: {error}",
+            self.milestone_label
+        );
         self.result = Err(error);
         event_loop.exit();
     }
@@ -230,7 +437,7 @@ impl ApplicationHandler for InstanceShell {
         }
 
         if matches!(event, WindowEvent::CloseRequested) {
-            println!("M1-S3 window close requested");
+            println!("{} window close requested", self.milestone_label);
             event_loop.exit();
         }
     }
